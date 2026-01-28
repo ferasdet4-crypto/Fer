@@ -856,3 +856,53 @@ globalThis.__KEEP__ = {
   nowMinutesUA,
   parseTokens
 };
+// ===================== KEEP SYMBOLS (ANTI TREE-SHAKING) =====================
+// Wrangler/ESBuild інколи викидає "не використані" функції при GitHub deploy.
+// Цей блок примушує бандлер зберегти їх у фінальному скрипті.
+globalThis.__KEEP__ = {
+  // routers
+  handleUpdate,
+  handleMessage,
+  handleCallback,
+
+  // bezsvitla flow
+  searchCities,
+  getQueuesFromCityUrl,
+  buildInfo,
+
+  // parsers + time
+  extractLiItems,
+  extractTimeOnly,
+  normalizeBlock,
+  findCurrentBlock,
+  findNextBlock,
+  toMin,
+  nowMinutesUA,
+
+  // UI
+  showMyQueues,
+  mainQueueKeyboard,
+
+  // ads/admin
+  initAdState,
+  maybeShowAd,
+  sendAdItem,
+  isAdmin,
+  showAdminMenu,
+  handleAdminAction,
+  showWhitelistMenu,
+  handleWhitelistCmd,
+
+  // telegram api
+  sendMessage,
+  editMessage,
+  answerCallback,
+  tgCall,
+
+  // state/env
+  parseTokens,
+  stKey,
+  getState,
+  hasAnyMedia,
+  mediaToAdItem
+};
