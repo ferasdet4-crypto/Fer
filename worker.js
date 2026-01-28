@@ -1,12 +1,19 @@
-// =====================================================
-// TELEGRAM LIGHT BOT — FULL VERSION
-// City → Queue → Schedule → Alerts → Admin Panel
-// =====================================================
-
-// ===================== MEMORY CACHE =====================
+// ===================== IN-MEMORY STATE =====================
 const S = new Map();
 
-// ===================== WORKER =====================
+/**
+ * State shape:
+ * {
+ *   cities: [{name,url}],
+ *   queues: [{name,url}],
+ *   selectedCity: {name,url} | null,
+ *   selected: {cityName, queueName, url} | null,
+ *   saved: [{cityName, queueName, url}],
+ *   ad: { enabled, frequency, counter, items },
+ *   whitelist: Set<string>
+ * }
+ */
+
 export default {
   async fetch(request, env) {
     try {
@@ -18,9 +25,8 @@ export default {
 
       if (url.pathname.startsWith("/webhook/")) {
         const token = url.pathname.split("/")[2];
-        if (!parseTokens(env.BOT_TOKENS).includes(token)) {
-          return new Response("Invalid token", { status: 403 });
-        }
+        const tokens = parseTokens(env.BOT_TOKENS);
+        if (!tokens.includes(token)) return new Response("Invalid token", { status: 403 });
 
         const update = await request.json();
         await handleUpdate(update, token, env);
@@ -29,7 +35,7 @@ export default {
 
       return new Response("Not found", { status: 404 });
     } catch (e) {
-      console.log("FETCH ERROR:", e);
+      console.log("FATAL", e);
       return new Response("Worker error", { status: 500 });
     }
   },
@@ -40,39 +46,30 @@ export default {
   }
 };
 
-// =====================================================
-// UPDATE ROUTER
-// =====================================================
+// ===================== UPDATE ROUTER =====================
 async function handleUpdate(update, token, env) {
-  if (update.callback_query) {
-    await handleCallback(update.callback_query, token, env);
-    await answerCallback(token, update.callback_query.id);
-    return;
-  }
-  if (update.message) {
-    await handleMessage(update.message, token, env);
-  }
+  if (update.message) await handleMessage(update.message, token, env);
+  if (update.callback_query) await handleCallback(update.callback_query, token, env);
 }
 
-// =====================================================
-// MESSAGE HANDLER
-// =====================================================
+// ===================== MESSAGE HANDLER =====================
 async function handleMessage(message, token, env) {
   const chatId = message.chat.id;
   const text = (message.text || "").trim();
 
-  await registerUser(chatId, env);
+  // статистика
+  await env.STATS_KV.put(`u:${chatId}`, Date.now().toString(), { expirationTtl: 60 * 60 * 24 * 30 });
+
+  const key = stKey(token, chatId);
+  const st = getState(key);
+  S.set(key, st);
 
   if (text === "/start") {
-    await sendMessage(
-      token,
-      chatId,
-`⚡ Графік відключень світла
-
-✍️ Напиши назву міста`,
+    await sendMessage(token, chatId,
+      "⚡ ДТЕК • Світло Графік\n\n✍️ Напиши назву міста",
       {
         inline_keyboard: [
-          [{ text: "📋 Мої черги", callback_data: "my" }],
+          [{ text: "⭐ Мої черги", callback_data: "my" }],
           [{ text: "🤝 Стати спонсором", url: env.SPONSOR_LINK }]
         ]
       }
@@ -81,11 +78,14 @@ async function handleMessage(message, token, env) {
   }
 
   if (text === "/admin" && isAdmin(chatId, env)) {
-    await showAdminPanel(token, chatId, env);
+    await showAdminMenu(token, chatId, st, env);
     return;
   }
 
-  if (text.length < 2) return;
+  if (text.length < 2) {
+    await sendMessage(token, chatId, "✍️ Введи назву міста");
+    return;
+  }
 
   const cities = await searchCities(text);
   if (!cities.length) {
@@ -93,256 +93,147 @@ async function handleMessage(message, token, env) {
     return;
   }
 
-  S.set(chatId, { cities });
+  st.cities = cities;
+  st.selectedCity = null;
+  st.queues = [];
 
-  await sendMessage(
-    token,
-    chatId,
-    "📍 Обери місто:",
-    {
-      inline_keyboard: cities.map((c, i) => [
-        { text: c.name, callback_data: `city|${i}` }
-      ])
-    }
-  );
+  await sendMessage(token, chatId, "📍 Обери місто:", {
+    inline_keyboard: cities.map((c, i) => [{ text: c.name, callback_data: `city|${i}` }])
+  });
 }
 
-// =====================================================
-// CALLBACK HANDLER
-// =====================================================
+// ===================== CALLBACK HANDLER =====================
 async function handleCallback(q, token, env) {
   const chatId = q.message.chat.id;
+  const messageId = q.message.message_id;
   const data = q.data;
-  const msgId = q.message.message_id;
-  const st = S.get(chatId) || {};
 
-  // ---------- ADMIN ----------
-  if (data === "admin_stats" && isAdmin(chatId, env)) {
-    const stats = await env.STATS_KV.list();
-    await editMessage(
-      token,
-      chatId,
-      msgId,
-      `📊 Користувачів у боті: ${stats.keys.length}`,
-      adminKeyboard()
-    );
-    return;
-  }
+  await answerCallback(token, q.id);
 
-  // ---------- MY ----------
-  if (data === "my") {
-    const sub = await env.SUBS_KV.get(String(chatId), { type: "json" });
-    if (!sub) {
-      await sendMessage(token, chatId, "📭 У тебе немає збережених черг");
-      return;
-    }
-    await sendMessage(
-      token,
-      chatId,
-      `📍 ${sub.city}\n🔌 ${sub.queue}`,
-      {
-        inline_keyboard: [
-          [{ text: "🔄 Оновити", callback_data: "refresh" }],
-          [{ text: "📅 Завтра", callback_data: "tomorrow" }]
-        ]
-      }
-    );
-    return;
-  }
+  const key = stKey(token, chatId);
+  const st = getState(key);
+  S.set(key, st);
 
-  // ---------- CITY ----------
   if (data.startsWith("city|")) {
-    const idx = Number(data.split("|")[1]);
-    const city = st.cities?.[idx];
+    const city = st.cities[Number(data.split("|")[1])];
     if (!city) return;
 
+    st.selectedCity = city;
     const queues = await getQueuesFromCityUrl(city.url);
-    S.set(chatId, { city, queues });
+    st.queues = queues;
 
-    await editMessage(
-      token,
-      chatId,
-      msgId,
-      `📍 ${city.name}\n🔌 Обери чергу:`,
-      {
-        inline_keyboard: queues.map((q, i) => [
-          { text: q.name, callback_data: `queue|${i}` }
-        ])
-      }
+    await editMessage(token, chatId, messageId,
+      `🔌 Обери чергу\n📍 ${city.name}`,
+      { inline_keyboard: queues.map((q, i) => [{ text: q.name, callback_data: `queue|${i}` }]) }
     );
     return;
   }
 
-  // ---------- QUEUE ----------
   if (data.startsWith("queue|")) {
-    const idx = Number(data.split("|")[1]);
-    const queue = st.queues?.[idx];
-    if (!queue) return;
+    const qq = st.queues[Number(data.split("|")[1])];
+    if (!qq) return;
 
-    await env.SUBS_KV.put(
-      String(chatId),
+    st.selected = {
+      cityName: st.selectedCity.name,
+      queueName: qq.name,
+      url: qq.url
+    };
+
+    // 🔔 ПІДПИСКА НА АЛЕРТИ
+    await env.ALERTS_KV.put(
+      `${token}:${chatId}`,
       JSON.stringify({
         chatId,
         token,
-        city: st.city.name,
-        queue: queue.name,
-        url: queue.url,
+        url: qq.url,
         lastAlert: {}
       })
     );
 
-    const info = await buildInfo(queue.url, st.city.name, queue.name, env);
+    const info = await buildInfo(st.selected, env);
+    await editMessage(token, chatId, messageId, info, mainQueueKeyboard(env));
+    return;
+  }
 
-    await editMessage(
-      token,
-      chatId,
-      msgId,
-      info,
-      {
-        inline_keyboard: [
-          [{ text: "🔄 Оновити", callback_data: "refresh" }],
-          [{ text: "📅 Завтра", callback_data: "tomorrow" }]
-        ]
-      }
-    );
+  if (data === "refresh" && st.selected) {
+    const info = await buildInfo(st.selected, env);
+    await editMessage(token, chatId, messageId, info, mainQueueKeyboard(env));
   }
 }
 
-// =====================================================
-// CRON ALERTS (20 MINUTES)
-// =====================================================
+// ===================== ALERTS (CRON) =====================
 async function processAlerts(env) {
-  const list = await env.SUBS_KV.list();
-
+  const list = await env.ALERTS_KV.list();
   for (const k of list.keys) {
-    const sub = await env.SUBS_KV.get(k.name, { type: "json" });
+    const sub = await env.ALERTS_KV.get(k.name, { type: "json" });
     if (!sub) continue;
 
     const blocks = await loadBlocks(sub.url);
     const now = nowMinutesUA(env);
 
     for (const b of blocks) {
-      if (Math.abs(b.startMin - now) === 20 && sub.lastAlert?.on !== b.start) {
-        await sendMessage(
-          sub.token,
-          sub.chatId,
-          `🟢 Через 20 хв УВІМКНУТЬ світло\n⏰ ${b.start}`
-        );
-        sub.lastAlert.on = b.start;
-      }
-
-      if (Math.abs(b.endMin - now) === 20 && sub.lastAlert?.off !== b.end) {
-        await sendMessage(
-          sub.token,
-          sub.chatId,
-          `🔴 Через 20 хв ВИМКНУТЬ світло\n⏰ ${b.end}`
-        );
+      if (b.endMin - now === 20 && sub.lastAlert?.off !== b.end) {
+        await sendMessage(sub.token, sub.chatId, `🔴 Через 20 хв ВИМКНУТЬ світло\n⏰ ${b.end}`);
         sub.lastAlert.off = b.end;
+      }
+      if (b.startMin - now === 20 && sub.lastAlert?.on !== b.start) {
+        await sendMessage(sub.token, sub.chatId, `🟢 Через 20 хв УВІМКНУТЬ світло\n⏰ ${b.start}`);
+        sub.lastAlert.on = b.start;
       }
     }
 
-    await env.SUBS_KV.put(k.name, JSON.stringify(sub));
+    await env.ALERTS_KV.put(k.name, JSON.stringify(sub));
   }
-}
-
-// =====================================================
-// ADMIN PANEL
-// =====================================================
-function adminKeyboard() {
-  return {
-    inline_keyboard: [
-      [{ text: "📊 Статистика", callback_data: "admin_stats" }],
-      [{ text: "❌ Закрити", callback_data: "noop" }]
-    ]
-  };
-}
-
-async function showAdminPanel(token, chatId, env) {
-  await sendMessage(
-    token,
-    chatId,
-    "👑 Адмін-панель",
-    adminKeyboard()
-  );
-}
-
-// =====================================================
-// PARSING & HELPERS
-// =====================================================
-async function searchCities(query) {
-  const r = await fetch(
-    "https://bezsvitla.com.ua/search-locality?q=" + encodeURIComponent(query),
-    { headers: { "Accept": "application/json" } }
-  );
-  if (!r.ok) return [];
-  return (await r.json()).slice(0, 8);
-}
-
-async function getQueuesFromCityUrl(url) {
-  const html = await (await fetch(url)).text();
-  return [...new Set(
-    [...html.matchAll(/href="([^"]*cherha-[^"]+)"/g)]
-      .map(m => m[1])
-  )].map(u => ({
-    name: "Черга " + u.split("cherha-")[1].replace(/-/g, "."),
-    url: u.startsWith("http") ? u : "https://bezsvitla.com.ua" + u
-  }));
 }
 
 async function loadBlocks(url) {
-  const html = await (await fetch(url)).text();
-  const out = [];
-  for (const m of html.matchAll(/(\d{2}:\d{2})\s*[–-]\s*(\d{2}:\d{2})/g)) {
-    const s = toMin(m[1]);
-    let e = toMin(m[2]);
-    if (e < s) e += 1440;
-    out.push({ start: m[1], end: m[2], startMin: s, endMin: e });
-  }
-  return out;
+  const res = await fetch(url);
+  const html = await res.text();
+  return extractLiItems(html).map(normalizeBlock);
 }
 
-async function buildInfo(url, city, queue, env) {
-  const blocks = await loadBlocks(url);
-  const now = nowMinutesUA(env);
-
-  let status = "❓";
-  for (const b of blocks) {
-    if (now >= b.startMin && now < b.endMin) {
-      status = "🟢 Є світло до " + b.end;
-    }
-  }
-
-  const today = blocks.slice(0, 12);
-  const tomorrow = blocks.slice(12, 24);
-
-  return `📍 ${city}
-🔌 ${queue}
-
-${status}
-
-📊 Сьогодні:
-${today.map(b => `• ${b.start} – ${b.end}`).join("\n")}
-
-📅 Завтра:
-${tomorrow.map(b => `• ${b.start} – ${b.end}`).join("\n")}`;
+// ===================== UTIL / PARSERS =====================
+function extractLiItems(html) {
+  return [...html.matchAll(/(\d{2}:\d{2})\s*[–-]\s*(\d{2}:\d{2}).*(icon-(on|off))/g)]
+    .map(m => ({
+      start: m[1],
+      end: m[2],
+      on: m[4] === "on"
+    }));
 }
 
-// =====================================================
-// TELEGRAM API
-// =====================================================
-async function sendMessage(token, chatId, text, reply_markup) {
+function normalizeBlock(b) {
+  const s = toMin(b.start);
+  let e = toMin(b.end);
+  if (e < s) e += 1440;
+  return { ...b, startMin: s, endMin: e };
+}
+
+function toMin(t) {
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function nowMinutesUA(env) {
+  const offset = Number(env.UA_TZ_OFFSET_MIN || 120);
+  const d = new Date();
+  return (d.getUTCHours() * 60 + d.getUTCMinutes() + offset) % 1440;
+}
+
+// ===================== TELEGRAM =====================
+async function sendMessage(token, chatId, text, replyMarkup) {
   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, reply_markup })
+    body: JSON.stringify({ chat_id: chatId, text, reply_markup: replyMarkup })
   });
 }
 
-async function editMessage(token, chatId, message_id, text, reply_markup) {
+async function editMessage(token, chatId, messageId, text, replyMarkup) {
   await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, message_id, text, reply_markup })
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, reply_markup: replyMarkup })
   });
 }
 
@@ -354,31 +245,16 @@ async function answerCallback(token, id) {
   });
 }
 
-// =====================================================
-// UTILS
-// =====================================================
+// ===================== HELPERS =====================
 function parseTokens(raw) {
   return String(raw).split(",").map(x => x.trim());
 }
-
-function toMin(t) {
-  const [h, m] = t.split(":").map(Number);
-  return h * 60 + m;
+function stKey(token, chatId) { return `${token}:${chatId}`; }
+function getState(key) {
+  return S.get(key) || {
+    cities: [], queues: [], selectedCity: null, selected: null, saved: [],
+    ad: { enabled: true, frequency: 3, counter: 0, items: [] },
+    whitelist: new Set()
+  };
 }
-
-function nowMinutesUA(env) {
-  const off = Number(env.UA_TZ_OFFSET_MIN || 120);
-  const d = new Date();
-  return (d.getUTCHours() * 60 + d.getUTCMinutes() + off + 1440) % 1440;
-}
-
-async function registerUser(chatId, env) {
-  const key = "u:" + chatId;
-  if (!(await env.STATS_KV.get(key))) {
-    await env.STATS_KV.put(key, "1");
-  }
-}
-
-function isAdmin(chatId, env) {
-  return String(chatId) === String(env.ADMIN_ID);
-          }
+function isAdmin(chatId, env) { return String(chatId) === String(env.ADMIN_ID); }
