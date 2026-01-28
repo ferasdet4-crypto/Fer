@@ -832,3 +832,27 @@ function nowMinutesUA(env) {
   const utcMin = d.getUTCHours() * 60 + d.getUTCMinutes();
   return (utcMin + offset + 1440) % 1440;
 }
+// ===== FORCE KEEP (anti-wrangler) =====
+globalThis.__KEEP__ = {
+  handleUpdate,
+  handleMessage,
+  handleCallback,
+
+  // core
+  searchCities,
+  getQueuesFromCityUrl,
+  buildInfo,
+
+  // admin
+  showAdminMenu,
+  handleAdminAction,
+  handleWhitelistCmd,
+
+  // ads
+  maybeShowAd,
+  sendAdItem,
+
+  // utils
+  nowMinutesUA,
+  parseTokens
+};
