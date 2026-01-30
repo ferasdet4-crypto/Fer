@@ -13,7 +13,7 @@
  *  - KV namespace binding: STATE_KV
  *  - BOT_TOKENS: "token1,token2" OR JSON '["token1","token2"]'
  *  - ADMIN_ID: Telegram numeric chat id (string ok)
- *  - SPONSOR_LINK: https://...
+ *  - SPONSOR_LINK: https://....
  *
  * OPTIONAL ENV:
  *  - AD_INFO_LINK (optional) where “Тут може бути ваша реклама” button leads (fallback SPONSOR_LINK)
