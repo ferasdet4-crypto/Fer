@@ -426,7 +426,7 @@ function computeStatus(blocks, nowMin) {
       nextLine = `⏰ Вимкнуть о ${current.end}\n⏳ Через ${fmtDelta(current.endMin - nowMin)}`;
       nextChangeType = "off";
     } else if (current.on === false) {
-      statusLine = "🔴 ЗАРАЗ НЕМА СВІТЛА";
+      statusLine = "🔴 ЗАРАЗ НЕМАЄ СВІТЛА";
       nextLine = `⏰ Увімкнуть о ${current.end}\n⏳ Через ${fmtDelta(current.endMin - nowMin)}`;
       nextChangeType = "on";
     } else {
