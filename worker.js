@@ -7,7 +7,7 @@
  * ✅ Saved queues, alerts toggle, cron alerts
  * ✅ Fix: /start, /my, /admin work in groups (/start@botname)
  * ✅ Fix: safer editMessage with fallback sendMessage
- * ✅ Fix: retries for fetching city queues & schedule pages
+ * ✅ Fix: retrie for fetching city queues & schedule pages
  *
  * REQUIRED BINDINGS (Cloudflare):
  *  - KV namespace binding: STATE_KV
